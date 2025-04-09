@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+
+def create_project_dump(root_dir, output_file):
+    with open(output_file, 'w', encoding='utf-8') as out:
+        for subdir, dirs, files in os.walk(root_dir):
+            for filename in files:
+                file_path = os.path.join(subdir, filename)
+                # Avoid writing the output file into itself
+                if os.path.abspath(file_path) == os.path.abspath(output_file):
+                    continue
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                except:
+                    # Skip unreadable or binary files
+                    continue
+
+                # Write path and file contents in the desired format
+                out.write(f"“{file_path}”: ```{content}```\n\n")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python dump_project.py <root_directory> <output_file>")
+        sys.exit(1)
+
+    root_directory = sys.argv[1]
+    output_file = sys.argv[2]
+    create_project_dump(root_directory, output_file)
