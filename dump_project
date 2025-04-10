@@ -3,30 +3,157 @@
 import os
 import sys
 
+try:
+    import pathspec
+except ImportError:
+    print("Error: 'pathspec' library not found.")
+    print("Please install it using: pip install pathspec")
+    sys.exit(1)
+
+def load_gitignore_patterns(root_dir):
+    """
+    Finds all .gitignore files within the root_dir, reads their patterns,
+    and returns a list of patterns.
+    """
+    patterns = []
+    gitignore_paths = []
+    # Walk the directory tree to find all .gitignore files
+    for subdir, _, files in os.walk(root_dir):
+        if '.gitignore' in files:
+            gitignore_paths.append(os.path.join(subdir, '.gitignore'))
+
+    # Ensure we process .gitignore from parent directories first if needed,
+    # although pathspec handles precedence reasonably well when loaded together.
+    # For simplicity here, we just read them all.
+    for gitignore_path in gitignore_paths:
+        try:
+            with open(gitignore_path, 'r', encoding='utf-8') as f:
+                # Add patterns line by line, ignoring comments and empty lines
+                for line in f:
+                    stripped_line = line.strip()
+                    if stripped_line and not stripped_line.startswith('#'):
+                        patterns.append(stripped_line)
+        except Exception as e:
+            print(f"Warning: Could not read {gitignore_path}: {e}", file=sys.stderr)
+
+    # Add common VCS directories just in case they aren't in .gitignore
+    # You might want to customize this list
+    patterns.extend(['.git/', '.hg/', '.svn/'])
+
+    return patterns
+
 def create_project_dump(root_dir, output_file):
+    """
+    Walks through the root_dir, reads text files, and writes their
+    path and content to output_file, respecting .gitignore rules.
+    """
+    print(f"Loading .gitignore patterns from: {root_dir}")
+    ignore_patterns = load_gitignore_patterns(root_dir)
+    # Use GitWildMatchPattern for .gitignore style matching
+    spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, ignore_patterns)
+    abs_output_file = os.path.abspath(output_file)
+    abs_root_dir = os.path.abspath(root_dir)
+
+    print(f"Starting project dump to: {output_file}")
+    found_files = 0
+    ignored_files = 0
+    written_files = 0
+
     with open(output_file, 'w', encoding='utf-8') as out:
-        for subdir, dirs, files in os.walk(root_dir):
+        for subdir, dirs, files in os.walk(root_dir, topdown=True):
+            # Prune directories based on gitignore rules
+            # This avoids walking into ignored directories like .git, node_modules, etc.
+            # We need to modify dirs *in-place* for os.walk(topdown=True) to skip them.
+            original_dirs = list(dirs) # Make a copy to iterate over while modifying dirs
+            dirs[:] = [] # Clear the original list
+            for d in original_dirs:
+                dir_path = os.path.join(subdir, d)
+                # Get path relative to the root for matching
+                relative_dir_path = os.path.relpath(dir_path, abs_root_dir).replace(os.sep, '/')
+                # Pathspec needs a trailing slash for directories to match dir patterns correctly
+                if not spec.match_file(relative_dir_path + '/'):
+                    dirs.append(d) # Keep the directory if it's not ignored
+                else:
+                    ignored_files += 1 # Count ignored directories (approximately)
+                    # print(f"Ignoring directory: {relative_dir_path}") # Optional debug
+
+            # Process files in the current directory
             for filename in files:
                 file_path = os.path.join(subdir, filename)
-                # Avoid writing the output file into itself
-                if os.path.abspath(file_path) == os.path.abspath(output_file):
+                abs_file_path = os.path.abspath(file_path)
+
+                # 1. Avoid writing the output file into itself
+                if abs_file_path == abs_output_file:
                     continue
 
+                # 2. Check against .gitignore rules
+                # Get path relative to the root for matching
+                relative_file_path = os.path.relpath(abs_file_path, abs_root_dir).replace(os.sep, '/')
+                if spec.match_file(relative_file_path):
+                    ignored_files += 1
+                    # print(f"Ignoring file: {relative_file_path}") # Optional debug
+                    continue
+
+                found_files += 1
+
+                # 3. Try reading the file
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                except:
-                    # Skip unreadable or binary files
+                    # Use 'rb' and decode explicitly to handle potential encoding errors better
+                    with open(file_path, 'rb') as f_in:
+                        content_bytes = f_in.read()
+
+                    # Try decoding as UTF-8, fallback to latin-1 if errors occur
+                    try:
+                        content = content_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        # If UTF-8 fails, try latin-1 (preserves byte values)
+                        # or skip if it's likely binary
+                        try:
+                            content = content_bytes.decode('latin-1')
+                            print(f"Warning: File {relative_file_path} not UTF-8, decoded as latin-1.", file=sys.stderr)
+                        except Exception:
+                            # print(f"Skipping likely binary file: {relative_file_path}") # Optional debug
+                            ignored_files += 1 # Count binary files as 'ignored' from output
+                            continue # Skip file if it cannot be decoded reasonably
+
+                except IOError as e:
+                    print(f"Warning: Could not read file {file_path}: {e}", file=sys.stderr)
+                    ignored_files += 1 # Count unreadable files as 'ignored'
+                    continue
+                except Exception as e:
+                    # Catch other potential errors during file read (e.g., permission denied)
+                    print(f"Warning: Error processing file {file_path}: {e}", file=sys.stderr)
+                    ignored_files += 1
                     continue
 
                 # Write path and file contents in the desired format
-                out.write(f"“{file_path}”: ```{content}```\n\n")
+                # Use the relative path for cleaner output
+                out.write(f"\"{relative_file_path}\": ```\n{content}\n```\n\n")
+                written_files += 1
+
+    print("-" * 20)
+    print(f"Project dump complete.")
+    print(f"Total files found (pre-ignore check): {found_files + ignored_files}") # Rough estimate
+    print(f"Files/Dirs ignored (gitignore, binary, unreadable, output file): {ignored_files}")
+    print(f"Files written to {output_file}: {written_files}")
+    print("-" * 20)
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage: python dump_project.py <root_directory> <output_file>")
+        print("Example: python dump_project.py ./my_project project_dump.txt")
         sys.exit(1)
 
     root_directory = sys.argv[1]
-    output_file = sys.argv[2]
-    create_project_dump(root_directory, output_file)
+    output_filename = sys.argv[2]
+
+    if not os.path.isdir(root_directory):
+        print(f"Error: Root directory '{root_directory}' not found or is not a directory.")
+        sys.exit(1)
+
+    try:
+        create_project_dump(root_directory, output_filename)
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}", file=sys.stderr)
+        sys.exit(1)
